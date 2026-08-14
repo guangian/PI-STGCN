@@ -1,0 +1,99 @@
+# PI-STGCN · 统一配置（全部阈值/常数集中于此，模型代码零硬编码）
+
+paths:
+  data_root: "data"                            # 本地数据目录（不随公开仓库提交，见 DATA.md）
+  wells_dir: "data/processed_wells"            # 单井文件（原始观测 + Mask 列）
+  wells_summary: "data/processed_wells/wells_summary_north_china_plain.csv"
+  results_root: "results"                      # 全部运行输出统一写入此目录
+
+data:
+  start_date: "2018-01-05"
+  end_date: "2022-12-30"
+  step_days: 5
+  # 数据划分：训练 2018–2019 / 验证 2020 / 测试 2021–2022（QC 后 561 井）
+  train_end: "2019-12-31"
+  val_end: "2020-12-31"                        # 测试期 = 2021-01-01 .. 2022-12-30
+  input_len: 24                                # 120 天
+  pred_len: 6                                  # 六步预测 T+1..T+6（30 天）
+  qc:                                          # 客观 QC：仅使用训练期信息
+    max_missing_rate: 0.40
+    min_std: 0.001                             # 常值序列剔除 (m)
+    max_abs_level: 3000.0                      # 异常水位剔除 (m)
+    max_step_jump: 30.0                        # 单步跳变阈值 (m / 5d)
+
+forcing:
+  # 单井文件 Precipitation_mm / Evapotranspiration_mm 为 5 日窗日均 mm/day；WaterUse_m3d 即 m³/day
+  precip_unit_to_m_per_day: 0.001
+  et_unit_to_m_per_day: 0.001
+  wu_unit_to_m3_per_day: 1.0
+  et_extinction_depth_m: 5.0                   # 潜水蒸散埋深消光深度
+
+graph:
+  knn_k: 8                                     # 信息图 kNN（分含水层独立建）
+  min_edge_dist_m: 50.0
+  dup_jitter_deg: 0.00002                      # 重合坐标抖动（约 2 m，Delaunay 需要）
+  voronoi_area_clip_q: [0.05, 0.95]            # 控制体面积截断分位数
+  max_wd_ratio: 20.0                           # 界面宽/井距上限（防共点伪边高传导度）
+  info_kernel_km: 20.0                         # 信息图高斯核宽度
+
+physics:
+  lambda_prior: 0.0                            # 反演先验锚强度（0 = 直接输出，无先验校准）
+  k_range_m_per_day: [0.1, 100.0]              # K 先验区间（对数尺度 sigmoid 映射）
+  sy_range: [0.01, 0.35]
+  gamma_range: [0.05, 0.35]                    # 入渗补给系数先验区间
+  # 文献先验常数：ParamNet 的初始化中心
+  k_const: 10.0
+  sy_const: 0.10
+  gamma_const: 0.15
+  tau_recharge_days: [5.0, 120.0]              # 包气带补给滞后时间常数
+  tau_baseflow_days: [7.0, 3650.0]             # 线性退水时间常数（下限 7 d：灌溉胁迫浅层
+                                               # 含水层的快响应尺度）
+  tau_recharge_const: 20.0
+  tau_baseflow_const: 365.0
+  aquifer_thickness_prior_m: 60.0              # 基底先验：z_bot = dem − b0 + Δz
+  dz_range_m: [-20.0, 20.0]
+  min_sat_thickness_m: 1.0
+  smooth_reg_weight: 0.001                     # 参数场空间平滑正则
+  pde_char_scale_m_per_day: 0.005              # PDE 残差无量纲化尺度 r0
+  rollout_dh_clip_m: 2.0                       # 物理 rollout 单步限幅（数值稳定）
+
+model:
+  hidden: 64
+  tcn_dilations: [1, 2, 4, 8]                  # 感受野 31 步 ≈ 155 天
+  tcn_kernel: 3
+  gc_layers: 2
+  dropout: 0.1
+  use_leddam: false
+  use_star: false
+  use_darcy_attn: true                         # 达西注意力：达西定律作为注意力打分函数
+  head_mode: "lean"                            # 低容量物理结构头（与数据体量匹配的容量设计）
+  derive_tau: true                             # τ_b = Sy·L₀²/(4T̄) 而非 ParamNet 自由输出
+  darcy_content: true                          # 内容注意力 × 达西物理掩码
+  use_ref_bottom: true                         # 底板用钻孔地层几何插值（z_bot_at_wells.csv）
+  derive_tau_r: true                           # 包气带补给滞后绑定埋深 τ_r=clamp(c_r·depth)
+  derive_L0_geo: false                         # L₀ 用全局可学习标量
+
+train:
+  seed: 42
+  epochs: 400                                  # 验证 skill 约在 130 轮饱和
+  patience: 40
+  # 检查点选型口径：'skill'=逐井配对 persistence skill 中位（与正文主口径一致）
+  select_metric: "skill"
+  # 按 ±w 轮中心滑动平均的验证分选型（选中心轮权重），早停同口径
+  select_smooth_w: 3
+  swa_top_k: 0
+  # 可靠性收缩：主干冻结后在验证期标定逐井收缩系数 λ（测试集不参与）
+  use_shrink: true
+  batch_windows: 8
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip: 2.0
+  w_h: 1.0                                     # 水位项权重（逐井标准化空间）
+  w_dh: 0.5                                    # 变化量项权重（含 h_last→T+1 首步）
+  horizon_balance: true                        # 逐步长损失均衡（防短步长欠拟合）
+  lambda_pde: 0.2                              # CVFD 残差权重（验证集选型）
+  pde_windows_per_batch: 2
+  nn_input_forcing: true                       # 强迫进 NN + 物理路径
+  node_mask_frac: 0.15                         # masked-node 遮蔽比例（空间自监督）
+  mask_eval_weight: 1.0
+  ema_decay: 0.0

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+results/*
+!results/full/
+results/full/*
+!results/full/per_well_RMSE_NSE.csv
+!results/full/per_well_RMSE_NSE_pivot.csv
+.vscode/
+.idea/
+.DS_Store
