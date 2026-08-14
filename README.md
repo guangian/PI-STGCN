@@ -59,6 +59,7 @@ Result files:
 - [`per_well_RMSE_NSE_pivot.csv`](results/full/per_well_RMSE_NSE_pivot.csv)
   contains one row per well and paired RMSE/NSE columns for all horizons
   (561 rows).
+
 The repository includes the script for generating 561 per-well PNG figures,
 but the generated images themselves are intentionally not distributed. Each
 figure overlays observed and predicted groundwater levels on one timeline;
