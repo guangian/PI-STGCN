@@ -16,33 +16,26 @@ import torch.nn as nn
 
 
 class ParamNet(nn.Module):
-    """dPL 参数场生成器：静态协变量 → 有界物理参数（节点数无关，目标域可前向重建）.
+    """Static well descriptors -> bounded effective K, Sy, gamma and free tau_b.
 
-    输出 6 个参数场：K（渗透系数）、Sy（给水度）、Δz_bot（基底校正）、
-    γ（入渗补给系数）、τ_r（包气带补给滞后）、τ_b（退水时间常数）。
-    **先验中心化初始化**：末层零初始化 + 偏置解析设置，使全部井的初始参数
-    精确等于文献先验常数（K=10 m/d、Sy=0.10、γ=0.15、τ_r=20 d、τ_b=365 d、Δz=0）——
-    网络只学习"数据支持的对先验的偏离"，缓解参数可辨识性问题，
-    并消除随机初始参数场导致的种子间训练不稳定。
+    The first three outputs are the effective parameter fields described in
+    the manuscript. ``tau_b`` is retained only for the reported free-recession
+    ablation; the full model derives recession from Sy and effective T.
     """
 
-    def __init__(self, in_dim: int, hidden: int, k_range, sy_range, dz_range, gamma_range,
-                 tau_r_range, tau_b_range,
+    def __init__(self, in_dim: int, hidden: int, k_range, sy_range, gamma_range,
+                 tau_b_range,
                  k_prior: float = 10.0, sy_prior: float = 0.10, gamma_prior: float = 0.15,
-                 tau_r_prior: float = 20.0, tau_b_prior: float = 365.0):
+                 tau_b_prior: float = 365.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.SiLU(),
             nn.Linear(hidden, hidden), nn.SiLU(),
-            nn.Linear(hidden, 6))
+            nn.Linear(hidden, 4))
         self.register_buffer("logk_lo", torch.log(torch.tensor(float(k_range[0]))))
         self.register_buffer("logk_hi", torch.log(torch.tensor(float(k_range[1]))))
         self.sy_lo, self.sy_hi = float(sy_range[0]), float(sy_range[1])
-        self.dz_lo, self.dz_hi = float(dz_range[0]), float(dz_range[1])
         self.g_lo, self.g_hi = float(gamma_range[0]), float(gamma_range[1])
-        # 时间常数用对数尺度映射（跨度大）
-        self.register_buffer("logtr_lo", torch.log(torch.tensor(float(tau_r_range[0]))))
-        self.register_buffer("logtr_hi", torch.log(torch.tensor(float(tau_r_range[1]))))
         self.register_buffer("logtb_lo", torch.log(torch.tensor(float(tau_b_range[0]))))
         self.register_buffer("logtb_hi", torch.log(torch.tensor(float(tau_b_range[1]))))
 
@@ -61,38 +54,19 @@ class ParamNet(nn.Module):
         prior_bias = [
             logit(frac_log(k_prior, float(k_range[0]), float(k_range[1]))),
             logit(frac_lin(sy_prior, self.sy_lo, self.sy_hi)),
-            logit(frac_lin(0.0, self.dz_lo, self.dz_hi)),
             logit(frac_lin(gamma_prior, self.g_lo, self.g_hi)),
-            logit(frac_log(tau_r_prior, float(tau_r_range[0]), float(tau_r_range[1]))),
             logit(frac_log(tau_b_prior, float(tau_b_range[0]), float(tau_b_range[1]))),
         ]
         nn.init.zeros_(self.net[-1].weight)
         with torch.no_grad():
             self.net[-1].bias.copy_(torch.tensor(prior_bias, dtype=torch.float32))
-        # 先验锚（MAP 先验）：反演在本数据上是欠定的——K 场在邻域内几乎无变化、
-        # softmax 又消去仅依赖目标井的因子，数据对 K/Sy 的约束极弱。若不加锚，网络会把
-        # 它们拟合到训练期噪声上并在留出期失效（实测：把反演 K 换成常数反而更准）。
-        # 该惩罚在 logit 空间把参数拉回文献先验，强度由验证集选择，等价于高斯先验下的 MAP。
-        self.register_buffer("prior_logit", torch.tensor(prior_bias, dtype=torch.float32))
-
-    def prior_penalty(self, static_feats: torch.Tensor) -> torch.Tensor:
-        """反演场相对文献先验在 logit 空间的均方偏离（逐参数等权）。"""
-        return ((self.net(static_feats) - self.prior_logit) ** 2).mean()
-
-    def forward(self, static_feats: torch.Tensor, gamma_bounds: torch.Tensor | None = None):
-        """gamma_bounds [N,2]（可选）：逐井 γ 物理区间（手册降水入渗系数相带分带，
-        gamma_facies_band 臂由 Trainer 注入）。None 时用全局标量区间，行为与历史完全一致。"""
-        s = torch.sigmoid(self.net(static_feats))         # [N, 6]
+    def forward(self, static_feats: torch.Tensor):
+        s = torch.sigmoid(self.net(static_feats))
         K = torch.exp(self.logk_lo + s[:, 0] * (self.logk_hi - self.logk_lo))
         Sy = self.sy_lo + s[:, 1] * (self.sy_hi - self.sy_lo)
-        dz = self.dz_lo + s[:, 2] * (self.dz_hi - self.dz_lo)
-        if gamma_bounds is not None:
-            gamma = gamma_bounds[:, 0] + s[:, 3] * (gamma_bounds[:, 1] - gamma_bounds[:, 0])
-        else:
-            gamma = self.g_lo + s[:, 3] * (self.g_hi - self.g_lo)
-        tau_r = torch.exp(self.logtr_lo + s[:, 4] * (self.logtr_hi - self.logtr_lo))
-        tau_b = torch.exp(self.logtb_lo + s[:, 5] * (self.logtb_hi - self.logtb_lo))
-        return {"K": K, "Sy": Sy, "dz": dz, "gamma": gamma, "tau_r": tau_r, "tau_b": tau_b}
+        gamma = self.g_lo + s[:, 2] * (self.g_hi - self.g_lo)
+        tau_b = torch.exp(self.logtb_lo + s[:, 3] * (self.logtb_hi - self.logtb_lo))
+        return {"K": K, "Sy": Sy, "gamma": gamma, "tau_b": tau_b}
 
     @staticmethod
     def smoothness_penalty(param: torch.Tensor, src: torch.Tensor, dst: torch.Tensor,
@@ -127,26 +101,8 @@ def segment_logsumexp(logits: torch.Tensor, index: torch.Tensor, n: int) -> torc
     return torch.where(has, mx + torch.log(den.clamp(min=1e-30)), torch.zeros_like(den))
 
 
-class ResponseKernel(nn.Module):
-    """物理响应核：把反演参数放到**信号真正所在的位置**——单井的退水时间常数。
-
-    v3 及以前 K 只进入侧向通量项。5 天步长、~20 km 井距下侧向项约 1e-4 m/步，
-    而垂向补给项约 1e-1 m/步，K 收到的梯度小三个量级，反演因此空转
-    （参数套件实测：整场替换 RMSE 变化 0.00%）。
-
-    本模块改用线性水库（Maillet 退水）解：把 Boussinesq 方程在均值附近线性化后，
-    单井水位距平对面状补给的响应是一个一阶储库，时间常数
-
-        τ_i = Sy_i · L₀² / (4 · T̄_i),      T̄_i = 邻域有效导水系数 (m²/d)
-
-    L₀ 是流域尺度的有效排泄半间距（河渠/排泄边界间距的一半），全域**单一可学习标量**——
-    逐井差异全部来自 Sy/T̄，正是需要被辨识的量。τ 决定退水快慢、1/Sy 决定补给响应幅值，
-    两者都直接写在预测的水位增量里，因而从观测退水曲线上可辨识，并可用外部
-    水文地质分区独立校验（见 `coder/make_param_reference.py`）。
-
-    L₀ 的初始化是解析的：在文献先验 (K₀, Sy₀, b₀) 下恰好复现先验退水常数 τ₀，
-    使 no_paramnet 消融臂的起点与 full 完全一致（对照公平）。
-    """
+class RecessionTimeScale(nn.Module):
+    """Derive tau = Sy * L0^2 / (4 * T_bar) for the physical rollout."""
 
     def __init__(self, tau_range, tau_prior: float, k_prior: float, sy_prior: float,
                  b_prior: float, learnable_scale: bool = True):
@@ -156,53 +112,12 @@ class ResponseKernel(nn.Module):
         T0 = k_prior * b_prior
         L0 = math.sqrt(4.0 * tau_prior * T0 / max(sy_prior, 1e-6))
         self.log_L0 = nn.Parameter(torch.tensor(math.log(L0)), requires_grad=learnable_scale)
-        # Phase-2b：逐井几何 L₀ 的全局改正标量（有效排泄半间距 = s·地理排泄距离；
-        # s 吸收「地理距离 ≠ 有效半间距」的系统差，由 Trainer 依 L0_geo 中位数解析初始化，
-        # 使起点 τ 分布与全局 L₀ 版本一致）。L0_geo 缺失（跨域）时回退全局 log_L0。
-        self.log_s = nn.Parameter(torch.zeros(()), requires_grad=learnable_scale)
         self.tau_lo, self.tau_hi = float(tau_range[0]), float(tau_range[1])
 
-    def tau_days(self, T_bar: torch.Tensor, Sy: torch.Tensor,
-                 L0_geo: torch.Tensor | None = None) -> torch.Tensor:
-        """τ = Sy·L₀²/(4·T̄)，截断到配置的退水常数区间（数值稳定 + 物理合理）。
-
-        L0_geo [N]：井到排泄网络的地理距离；提供时 L₀_i = s·L0_geo_i（逐井几何化），
-        否则退回全局可学习 L₀。
-        """
-        if L0_geo is not None:
-            L0 = torch.exp(self.log_s) * L0_geo
-        else:
-            L0 = torch.exp(self.log_L0)
+    def tau_days(self, T_bar: torch.Tensor, Sy: torch.Tensor) -> torch.Tensor:
+        L0 = torch.exp(self.log_L0)
         tau = Sy * L0 * L0 / (4.0 * T_bar.clamp(min=1e-3))
         return tau.clamp(self.tau_lo, self.tau_hi)
-
-    @staticmethod
-    def memory(series: torch.Tensor, tau: torch.Tensor, dt: float) -> torch.Tensor:
-        """指数加权历史记忆 Σ_l exp(-(L-1-l)·Δt/τ)·x_l / Σ w，逐井 τ.
-
-        series [B,N,L]（或可广播到该形状），tau [B,N] 或 [N] → 返回 [B,N]。
-        归一化后量纲与 series 一致，避免 τ 变化时同时改变幅值与时序两个自由度。
-        """
-        L = series.shape[-1]
-        lag = torch.arange(L - 1, -1, -1, device=series.device, dtype=series.dtype)
-        w = torch.exp(-lag * dt / tau.unsqueeze(-1).clamp(min=1e-3))          # [...,L]
-        return (series * w).sum(-1) / w.sum(-1).clamp(min=1e-8)
-
-    def response(self, w_seq: torch.Tensor, tau: torch.Tensor, Sy: torch.Tensor,
-                 dt: float) -> torch.Tensor:
-        """未来净源汇序列 → 逐步长水位响应 [B,N,P]（线性水库解析积分）。
-
-        w_seq [B,N,P] 为净源汇 (m/d)。一阶储库 dh/dt = W/Sy − h/τ 的显式解：
-            h_k = h_{k-1}·exp(−Δt/τ) + (W_k·τ/Sy)·(1 − exp(−Δt/τ))
-        幅值 ∝ τ/Sy = L₀²/(4T̄) → 由 T̄ 定；时序 ∝ exp(−Δt/τ) → 由 Sy/T̄ 定。
-        """
-        decay = torch.exp(-dt / tau.clamp(min=1e-3))                          # [B,N]
-        gain = (tau / Sy.clamp(min=1e-4)) * (1.0 - decay)                     # [B,N]
-        h, out = torch.zeros_like(w_seq[..., 0]), []
-        for k in range(w_seq.shape[-1]):
-            h = h * decay + gain * w_seq[..., k]
-            out.append(h)
-        return torch.stack(out, dim=-1)
 
 
 class DarcyAttention(nn.Module):
@@ -226,10 +141,10 @@ class DarcyAttention(nn.Module):
         τ_i = (Σ_j T_ij / median_i Σ_j T_ij) ** γ_T
     γ_T=0 退化为纯份额注意力（与不含该通道的版本逐位相同），γ_T=1 为完整达西量级缩放。
 
-    参数量：6 个标量（λ1 λ2 λb λg λh logG）+ γ_T + ε + W_u/W_v/W_o，全部与井数 N 无关。
+    参数量：6 个达西幂律标量 + γ_T + ε，全部与井数 N 无关。
     """
 
-    def __init__(self, hidden: int, min_b: float = 1.0, eps_h_init: float = 0.1,
+    def __init__(self, min_b: float = 1.0, eps_h_init: float = 0.1,
                  learnable_exponents: bool = True, dynamic: bool = True, signed: bool = True,
                  uniform: bool = False, magnitude: bool = True):
         super().__init__()
@@ -253,19 +168,6 @@ class DarcyAttention(nn.Module):
         self.gamma_T = nn.Parameter(torch.zeros(()), requires_grad=learnable_exponents)
         self.raw_eps_h = nn.Parameter(
             torch.tensor(float(torch.log(torch.expm1(torch.tensor(eps_h_init))))))
-        self.w_u = nn.Linear(hidden, hidden, bias=False)     # 对称交换通道
-        self.w_v = nn.Linear(hidden, hidden, bias=False)     # 有向通量通道
-        self.w_o = nn.Linear(2 * hidden, hidden)
-        nn.init.zeros_(self.w_o.weight)                      # 零初始化：起点与无注意力模型逐位相同
-        nn.init.zeros_(self.w_o.bias)
-        # Gravityformer 式双通道打分：内容注意力 QK 与物理掩码相乘（log 空间相加）。
-        # 原文把 softmax 后的引力权重乘在学到的注意力上；这里等价地把 log T_ij 作为
-        # 加性 logit 偏置，使物理传导度始终单调地约束权重，同时允许数据补充残余结构。
-        self.w_q = nn.Linear(hidden, hidden // 2, bias=False)
-        self.w_k = nn.Linear(hidden, hidden // 2, bias=False)
-        self.scale = (hidden // 2) ** -0.5
-        # 内容项强度零初始化 → 起点是纯达西打分，学习只能在物理打分之上做增量修正
-        self.content_w = nn.Parameter(torch.zeros(()))
 
     def exponents(self) -> dict:
         sp = nn.functional.softplus
@@ -316,7 +218,7 @@ class DarcyAttention(nn.Module):
                                dtype=contrib.dtype).index_add_(-1, dst, contrib)
         return torch.exp(log_Tbar.clamp(-20.0, 20.0))
 
-    def attention(self, h_anom, K, z_bot, h_m, src, dst, width, dist, n, content=None):
+    def attention(self, h_anom, K, z_bot, h_m, src, dst, width, dist, n):
         """返回 α [B,E]（按目标井 dst 归一化）、有向符号 s [B,E] 与量级因子 τ [B,N]。
 
         α 只携带"份额"信息（softmax 后每个目标井的邻居权重和恒为 1），任何仅依赖目标井
@@ -335,8 +237,6 @@ class DarcyAttention(nn.Module):
             logit = log_T
             if self.dynamic:
                 logit = logit + e["lam_h"] * torch.log(dh.abs() + 1e-4)
-            if content is not None:      # Gravityformer 式：内容注意力 × 物理掩码
-                logit = logit + self.content_w * content
         alpha = segment_softmax(logit.clamp(-30.0, 30.0), dst, n)            # [B,E]
         sign = torch.tanh(dh / e["eps_h"]) if self.signed else torch.ones_like(dh)
         if self.magnitude and not self.uniform:
@@ -384,36 +284,6 @@ class DarcyAttention(nn.Module):
             diag["darcy_smooth_frac"] = float(
                 ((out - r).abs().mean() / (r.abs().mean() + 1e-9)).detach())
         return out, diag
-
-    def content_logit(self, z, src, dst):
-        """内容注意力 logit q_i·k_j/√d —— Gravityformer 中与引力权重相乘的那一项。"""
-        q, k = self.w_q(z), self.w_k(z)
-        return (q[:, dst] * k[:, src]).sum(-1) * self.scale                  # [B,E]
-
-    def forward(self, z, h_anom, K, z_bot, h_m, src, dst, width, dist,
-                return_diag: bool = False, use_content: bool = True):
-        """z [B,N,h] → 残差更新后的 [B,N,h]；h_anom/h_m [B,N] 米制。"""
-        n = z.shape[1]
-        content = self.content_logit(z, src, dst) if use_content else None
-        alpha, sign, tau = self.attention(h_anom, K, z_bot, h_m, src, dst, width, dist, n,
-                                          content=content)
-        u, v = self.w_u(z), self.w_v(z)                                      # [B,N,h]
-        a = alpha.unsqueeze(-1)
-        msg_sym = torch.zeros_like(u).index_add_(1, dst, a * u[:, src])
-        msg_dir = torch.zeros_like(v).index_add_(1, dst, a * sign.unsqueeze(-1) * v[:, src])
-        out = z + tau.unsqueeze(-1) * self.w_o(torch.cat([msg_sym, msg_dir], dim=-1))
-        if not return_diag:
-            return out
-        with torch.no_grad():
-            ent = -(alpha * torch.log(alpha + 1e-12))
-            ent_node = torch.zeros(z.shape[0], n, device=z.device).index_add_(1, dst, ent)
-            diag = {f"darcy_{k}": float(val.detach()) for k, val in self.exponents().items()}
-            diag["darcy_attn_entropy"] = float(ent_node.mean())
-            diag["darcy_eff_neighbors"] = float(torch.exp(ent_node).mean())
-            diag["darcy_sign_absmean"] = float(sign.abs().mean())
-            diag["darcy_gamma_T"] = float(self.gamma_T.detach())
-        return out, diag
-
 
 class EdgeConductance(nn.Module):
     """边传导度 T_ij = K̄_ij · b̄_ij · w_ij / d_ij（K̄ 谐波平均，b̄ 界面平均饱和厚度）."""
@@ -535,9 +405,7 @@ class CVFDResidual(nn.Module):
     - 源汇取距平 W − W̄（W̄ 为训练期平均源汇，吸收未知准稳态背景不平衡）；
     - valid = 潜水 × 内部节点；强迫取 t+1 标记（覆盖 (t, t+1] 区间）。
 
-    ``forward`` 保留旧版“完整预测轨迹残差”以复现历史结果。新版 physics2x2_v2
-    使用 ``defect_difference_loss``：只约束 NN 相对 detached 物理基线的修正，避免
-    rollout 与瞬时 CVFD 对同一外部强迫重复施加、且方向不一致。
+    The public release keeps the trajectory residual used by the manuscript.
     """
 
     def __init__(self, extinction_depth: float, dt_days: float,
@@ -580,36 +448,8 @@ class CVFDResidual(nn.Module):
     def forward(self, h_seq_m, h_mean_m, w_bar, K, Sy, gamma, z_bot, dem, area, valid_mask,
                 ei, ej, width, dist, precip, et, wu, cond: EdgeConductance,
                 signed: bool = True):
-        """旧版完整轨迹 PDE 损失；保留用于历史配置精确复现。"""
+        """Return the masked, dimensionless trajectory CVFD loss."""
         raw = self.raw_residual(
             h_seq_m, h_mean_m, w_bar, K, Sy, gamma, z_bot, dem, area,
             ei, ej, width, dist, precip, et, wu, cond, signed=signed)
         return self._masked_square(raw, valid_mask)
-
-    def defect_difference_loss(
-            self, h_pred_seq_m, h_ref_seq_m, h_mean_m, w_bar, K, Sy, gamma, z_bot,
-            dem, area, valid_mask, ei, ej, width, dist, precip, et, wu,
-            cond: EdgeConductance, signed: bool = True, beta: float = 0.0):
-        """NN 修正的精确缺陷差损失。
-
-        ``h_ref_seq_m`` 与 K/Sy/gamma/z_bot 应由调用方 stop-gradient；
-        ``h_pred_seq_m = stopgrad(h_ref_seq_m) + correction``。beta=0 时外部给定
-        源汇在两次残差中严格抵消，仅约束修正引入的增量水量缺陷。
-        """
-        r_pred = self.raw_residual(
-            h_pred_seq_m, h_mean_m, w_bar, K, Sy, gamma, z_bot, dem, area,
-            ei, ej, width, dist, precip, et, wu, cond, signed=signed)
-        r_ref = self.raw_residual(
-            h_ref_seq_m, h_mean_m, w_bar, K, Sy, gamma, z_bot, dem, area,
-            ei, ej, width, dist, precip, et, wu, cond, signed=signed)
-        defect = r_pred - r_ref
-        target = defect + float(beta) * r_ref.detach()
-        loss = self._masked_square(target, valid_mask)
-        valid = valid_mask.unsqueeze(0)
-        den = valid_mask.sum() * target.shape[0] + 1e-8
-        diag = {
-            "defect_rms_m_per_day": torch.sqrt(((defect * valid) ** 2).sum() / den),
-            "pred_rms_m_per_day": torch.sqrt(((r_pred * valid) ** 2).sum() / den),
-            "ref_rms_m_per_day": torch.sqrt(((r_ref * valid) ** 2).sum() / den),
-        }
-        return loss, diag

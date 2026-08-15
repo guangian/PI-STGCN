@@ -162,3 +162,48 @@ def write_per_well_csv(rows: list[dict], path, extra_fields: tuple = ()) -> None
         w = csv.DictWriter(fh, fieldnames=[*extra_fields, *PER_WELL_FIELDS])
         w.writeheader()
         w.writerows(rows)
+
+
+def write_rmse_nse_tables(rows: list[dict], long_path, pivot_path) -> None:
+    """Write the two compact result artifacts distributed on GitHub."""
+    compact = [
+        {
+            "well_id": row["well_id"],
+            "horizon": row["horizon"],
+            "RMSE_m": row["rmse_m"],
+            "NSE": row["nse"],
+        }
+        for row in rows
+    ]
+
+    def quote(value) -> str:
+        return f'"{str(value).replace(chr(34), chr(34) * 2)}"'
+
+    def metric(value) -> str:
+        return "" if value in (None, "") else f"{float(value):.6f}"
+
+    with open(long_path, "w", newline="", encoding="utf-8") as handle:
+        handle.write("well_id,horizon,RMSE_m,NSE\n")
+        for row in compact:
+            handle.write(
+                f"{quote(row['well_id'])},{row['horizon']},"
+                f"{metric(row['RMSE_m'])},{metric(row['NSE'])}\n"
+            )
+
+    horizons = list(dict.fromkeys(row["horizon"] for row in compact))
+    by_well: dict[str, dict] = {}
+    for row in compact:
+        well_id = str(row["well_id"])
+        target = by_well.setdefault(well_id, {"well_id": well_id})
+        target[f"{row['horizon']}_RMSE_m"] = row["RMSE_m"]
+        target[f"{row['horizon']}_NSE"] = row["NSE"]
+    fields = ["well_id"] + [
+        field
+        for horizon in horizons
+        for field in (f"{horizon}_RMSE_m", f"{horizon}_NSE")
+    ]
+    with open(pivot_path, "w", newline="", encoding="utf-8") as handle:
+        handle.write(",".join(fields) + "\n")
+        for row in by_well.values():
+            values = [quote(row["well_id"])] + [metric(row.get(field)) for field in fields[1:]]
+            handle.write(",".join(values) + "\n")
