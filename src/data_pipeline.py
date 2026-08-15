@@ -42,10 +42,19 @@ class DataBundle:
     train_end_idx: int
     val_end_idx: int
     qc_report: dict = field(default_factory=dict)
-    z_bot_ref: np.ndarray | None = None   # [N] 浅层系统底板标高 (m)，钻孔地层几何插值；
-    #   缺省 None（跨流域目标域无此资料时模型自动回退 dem−b₀+Δz 先验几何）
-    L0_geo: np.ndarray | None = None      # [N] 井到排泄网络（河道/海岸）的地理距离 (m)，
-    #   DEM 汇流分析派生（make_drainage_distance.py）；None 时 τ_b 回退全局可学习 L₀
+    z_bot_ref: np.ndarray | None = None   # [N] optional aquifer-bottom elevation (m)
+
+
+def set_data_root(cfg: dict, data_root: str | Path | None) -> None:
+    """Point the tracked configuration at a private local data directory."""
+    if data_root is None:
+        return
+    root = Path(data_root).expanduser().resolve()
+    cfg["paths"]["data_root"] = str(root)
+    cfg["paths"]["wells_dir"] = str(root / "processed_wells")
+    cfg["paths"]["wells_summary"] = str(
+        root / "processed_wells" / "wells_summary_north_china_plain.csv"
+    )
 
 
 def _causal_fill(col: np.ndarray, head_value: float) -> np.ndarray:
@@ -166,19 +175,11 @@ def load_bundle(cfg: dict, coder_dir: Path) -> DataBundle:
         zdf = pd.read_csv(zf, dtype={"well_id": str}, encoding="utf-8-sig").set_index("well_id")
         z_bot_ref = zdf.reindex(keep)["z_bot_m"].to_numpy(dtype=np.float32)
         assert np.isfinite(z_bot_ref).all(), "z_bot_at_wells.csv 覆盖不全：存在 QC 保留井缺底板值"
-    # 排泄网络距离（make_drainage_distance.py 产出；仅源域可用）
-    L0_geo = None
-    lf = root / "geometry" / "L0_at_wells.csv"
-    if lf.exists():
-        ldf = pd.read_csv(lf, dtype={"well_id": str}, encoding="utf-8-sig").set_index("well_id")
-        L0_geo = ldf.reindex(keep)["L0_m"].to_numpy(dtype=np.float32)
-        assert np.isfinite(L0_geo).all(), "L0_at_wells.csv 覆盖不全：存在 QC 保留井缺排泄距离"
-
     return DataBundle(dates=dates, well_ids=keep, H_fill=H_fill, H_obs=H_obs, mask=mask,
                       coords=coords, dem=dem, aquifer_onehot=aquifer_onehot,
                       precip=precip, et=et, wu=wu,
                       train_end_idx=train_end_idx, val_end_idx=val_end_idx, qc_report=report,
-                      z_bot_ref=z_bot_ref, L0_geo=L0_geo)
+                      z_bot_ref=z_bot_ref)
 
 
 # ---------------------------------------------------------------- normalizer
@@ -230,32 +231,8 @@ def build_windows(T: int, input_len: int, pred_len: int,
     return out
 
 
-def make_features(bundle: DataBundle, normalizer: PerWellNormalizer) -> dict:
-    """时序特征 [T, N, 7]（h_norm/观测标志/降水/蒸散/抽水/年周期 sin/cos）+ 静态协变量 [N, 7].
-
-    强迫的全局 z-score 统计仅用训练期；静态协变量 = 域内标准化经纬度 + DEM + 含水层 one-hot
-    + 埋深（dem − 训练期均值水位）+ log 训练期水位波动尺度。后两项是训练期观测统计量
-    （与逐井 z-score 同信息类别、因果可得、跨域可算），给 ParamNet 提供表达
-    「包气带厚度 / 动态强度」空间结构的词汇——纯 lon/lat 平滑场表达不了岩性梯度（Phase-2）。
-    """
-    T, N = bundle.H_fill.shape
-    tr = slice(0, bundle.train_end_idx + 1)
-
-    def gz(x):
-        m, s = float(x[tr].mean()), float(x[tr].std()) + 1e-8
-        return ((x - m) / s).astype(np.float32)
-
-    h_norm = (bundle.H_fill - normalizer.mean) / normalizer.std
-    soy = np.minimum((bundle.dates.dayofyear - 1) // 5, 72).to_numpy().astype(np.float32) / 73.0
-    feats = np.zeros((T, N, 7), dtype=np.float32)
-    feats[..., 0] = h_norm
-    feats[..., 1] = bundle.mask                     # 观测/填充标志（因果可得）
-    feats[..., 2] = gz(bundle.precip)[:, None]
-    feats[..., 3] = gz(bundle.et)[:, None]
-    feats[..., 4] = gz(bundle.wu)
-    feats[..., 5] = np.sin(2 * np.pi * soy)[:, None]
-    feats[..., 6] = np.cos(2 * np.pi * soy)[:, None]
-
+def make_static_features(bundle: DataBundle, normalizer: PerWellNormalizer) -> dict:
+    """Build the seven static ParamNet descriptors stated in the manuscript."""
     zs = lambda x: (x - x.mean()) / (x.std() + 1e-8)
     depth = np.clip(bundle.dem - normalizer.mean, 0.0, None)             # [N] 埋深 (m)
     log_amp = np.log(normalizer.std + 1e-3)                              # [N] 波动尺度
@@ -263,5 +240,5 @@ def make_features(bundle: DataBundle, normalizer: PerWellNormalizer) -> dict:
         (bundle.coords - bundle.coords.mean(0)) / (bundle.coords.std(0) + 1e-8),
         ((bundle.dem - bundle.dem.mean()) / (bundle.dem.std() + 1e-8))[:, None],
         bundle.aquifer_onehot,
-        zs(depth)[:, None], zs(log_amp)[:, None]], axis=1).astype(np.float32)   # [N, 7]
-    return {"feats": feats, "static": static}
+        zs(depth)[:, None], zs(log_amp)[:, None]], axis=1).astype(np.float32)
+    return {"static": static}

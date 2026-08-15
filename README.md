@@ -4,87 +4,75 @@ Official code and released results for **“PI-STGCN: An Interpretable
 Spatio-Temporal Graph Neural Network Based on Darcy's Law and the Boussinesq
 Model for Multiscale Groundwater Level Prediction.”**
 
-PI-STGCN performs six-step groundwater-level forecasting (T+1 to T+6, a
-5-day step and a 30-day forecast horizon) on a dual spatial graph. The model
-combines a data-driven spatio-temporal backbone with Darcy-aware attention and
-a finite-volume groundwater-balance constraint.
+PI-STGCN generates T+1...T+6 groundwater-level forecasts in one forward pass
+(five days per step; 30 days total). The final release path combines:
 
-> **Data availability:** the groundwater observations and water-use records
-> are not distributed in this public repository because redistribution
-> permission has not yet been finalized. See [DATA.md](DATA.md) for the exact
-> input layout, schemas, units, and provenance. The code and released result
-> artifacts are public.
+- five interpretable groundwater-level increments from 5 to 60 days;
+- a node-shared response MLP with known future forcing;
+- bounded effective hydrogeological parameters from ParamNet;
+- a fixed Delaunay–Voronoi physical control-volume graph;
+- dynamic, signed DarcyAttention response redistribution;
+- a differentiable physical trajectory and CVFD water-balance residual;
+- current-level anchoring and validation-only reliability shrinkage.
+
+The implementation has 4,093 trainable parameters and contains no learnable
+N-by-N adjacency matrix. See [METHODOLOGY_ALIGNMENT.md](METHODOLOGY_ALIGNMENT.md)
+for the equation-to-code map and the supported manuscript ablations.
+
+> **Data availability:** groundwater observations and water-use records are
+> not included because redistribution permission has not been finalized. See
+> [DATA.md](DATA.md) for the input schemas, units and provenance. The `data/`
+> directory is ignored by Git.
 
 ## Repository structure
 
 ```text
 .
-├── main.py                         # train -> validate -> test
+├── main.py                         # train -> validate -> test -> export
 ├── generate_well_prediction_plots.py
-├── config.yaml                     # data, graph, physics, model, and training settings
-├── requirements.txt                # tested Python dependencies
-├── DATA.md                         # data availability and required schemas
-├── LICENSE                         # MIT License for code
+├── config.yaml                     # released experiment settings
+├── requirements.txt
+├── DATA.md
+├── METHODOLOGY_ALIGNMENT.md
+├── LICENSE
 ├── src/
-│   ├── data_pipeline.py            # loading, causal filling, QC, normalization, windows
-│   ├── graphs.py                   # physical Delaunay/Voronoi and informational kNN graphs
-│   ├── model.py                    # PI-STGCN network
-│   ├── physics.py                  # Darcy attention and physics rollout/residual
-│   ├── trainer.py                  # optimization, model selection, shrinkage, evaluation
-│   └── evaluation.py               # per-well and aggregate metrics
+│   ├── data_pipeline.py            # loading, causal filling, QC, normalization
+│   ├── graphs.py                   # fixed Delaunay–Voronoi physical graph
+│   ├── model.py                    # node-shared MLP, anchor, gate, shrinkage
+│   ├── physics.py                  # ParamNet, DarcyAttention, rollout, CVFD
+│   ├── trainer.py                  # losses, selection, shrinkage, evaluation
+│   └── evaluation.py               # per-well RMSE/NSE and exports
 └── results/full/
-    ├── per_well_RMSE_NSE.csv       # long table: 561 wells x 7 horizons
-    └── per_well_RMSE_NSE_pivot.csv # GitHub-ready wide pivot table
+    ├── per_well_RMSE_NSE.csv
+    └── per_well_RMSE_NSE_pivot.csv
 ```
 
-The private `data/` directory, Python environment, checkpoints, logs, raw
-prediction arrays, per-well PNG figures, and intermediate reports are excluded
-through `.gitignore`.
+Checkpoints, logs, raw arrays, private data and all per-well PNG files remain
+local through `.gitignore`.
 
 ## Released results
 
-The released test artifacts were produced with seed 42 on 561 monitoring
-wells. The verified overall station-median test scores are:
+The released seed-42 run evaluates 561 wells on the independent 2021–2022
+test period. Its overall station-median scores are:
 
 | Metric | Value |
 |---|---:|
-| RMSE | 0.5252 m |
-| NSE | 0.7519 |
+| RMSE | 0.5198 m |
+| NSE | 0.7603 |
 
-Result files:
-
-- [`per_well_RMSE_NSE.csv`](results/full/per_well_RMSE_NSE.csv) contains
-  `well_id`, `horizon`, `RMSE_m`, and `NSE` for T+1 through T+6 and `overall`
-  (3,927 rows).
+- [`per_well_RMSE_NSE.csv`](results/full/per_well_RMSE_NSE.csv) is the long
+  table with `well_id`, `horizon`, `RMSE_m` and `NSE` for T+1...T+6 and
+  `overall` (3,927 rows).
 - [`per_well_RMSE_NSE_pivot.csv`](results/full/per_well_RMSE_NSE_pivot.csv)
-  contains one row per well and paired RMSE/NSE columns for all horizons
-  (561 rows).
+  is the final wide table with one row per well (561 rows).
 
-The repository includes the script for generating 561 per-well PNG figures,
-but the generated images themselves are intentionally not distributed. Each
-figure overlays observed and predicted groundwater levels on one timeline;
-dashed vertical lines separate train, validation, and test. The continuous
-predicted curve is the mean of all overlapping T+1...T+6 forecasts that target
-the same date.
-
-RMSE and NSE are calculated per well using observed points only (`Mask = 1`):
-
-```text
-RMSE = sqrt(mean((prediction - observation)^2))
-NSE  = 1 - sum((observation - prediction)^2)
-           / sum((observation - mean(observation))^2)
-```
+Both files are generated directly by `main.py`; no manual spreadsheet step is
+required.
 
 ## Environment
 
-The released run was tested with:
-
-- Python 3.12.6
-- PyTorch 2.5.1+cu121
-- CUDA 12.1
-- NVIDIA GeForce RTX 4070
-
-Create an environment and install the dependencies:
+The tested environment is Python 3.12, PyTorch 2.5.1 and CUDA 12.1. Create an
+environment and install the dependencies:
 
 ```bash
 python -m venv .venv
@@ -95,78 +83,100 @@ python -m venv .venv
 # Linux/macOS
 source .venv/bin/activate
 
-pip install -r requirements.txt
-```
-
-For GPU execution, install the PyTorch build that matches the local CUDA
-runtime. For example, the released experiment used:
-
-```bash
 pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
 
+Install the CPU or CUDA build appropriate for the local machine when CUDA 12.1
+is unavailable.
+
 ## Data preparation
 
-Place the locally obtained data under `data/` using the exact structure and
-column schemas documented in [DATA.md](DATA.md). The default paths are defined
-in `config.yaml`; they may be changed for another local dataset.
+Prepare the private dataset with the structure documented in [DATA.md](DATA.md).
+It can remain anywhere on the local machine; `--data-root` overrides all three
+tracked data paths without editing `config.yaml`.
 
-The published split contains 365 five-day timestamps:
+The released temporal protocol is:
 
 | Split | Target period | Purpose |
 |---|---|---|
 | Train | 2018-01-05 to 2019-12-31 | optimization and training-only statistics |
-| Validation | 2020-01-05 to 2020-12-30 | checkpoint selection and shrinkage calibration |
+| Validation | 2020-01-05 to 2020-12-30 | checkpoint selection and shrinkage |
 | Test | 2021-01-04 to 2022-12-30 | final evaluation only |
 
-Windows whose target block crosses a split boundary are discarded.
+The input history contains 24 five-day steps and the target contains six
+five-day steps. Windows whose target block crosses a split boundary are
+discarded.
 
-## Run the experiment
+## Run
 
 Smoke test:
 
 ```bash
-python main.py --smoke --device cuda
+python main.py --data-root "/path/to/private/data" --smoke --device cuda
 ```
 
 Full experiment:
 
 ```bash
-python main.py --device cuda
+python main.py --data-root "/path/to/private/data" --device cuda
 ```
 
-Use `--device cpu` on a CPU-only machine. The seed can be overridden with
-`--seed`; `--save_arrays` additionally stores the test arrays for downstream
-analysis. On the tested RTX 4070, the released seed-42 run selected epoch 21,
-stopped after 64 epochs, and took approximately 133 seconds.
+The run automatically writes the two released RMSE/NSE tables. Use
+`--device cpu` on a CPU-only machine, `--seed` for another seed and
+`--save-arrays` for
+local downstream analysis.
 
-After training has produced `results/full/best_model.pt`, regenerate the 561
-per-well figures with:
+The verified seed-42 run selected epoch 21, stopped after 64 epochs and used
+approximately 145 seconds for model training on the local CUDA environment.
+
+The public entry point also reproduces every single-factor ablation retained
+in the manuscript, for example:
 
 ```bash
-python generate_well_prediction_plots.py --device cuda --dpi 300
+python main.py --data-root "/path/to/private/data" --ablation no_cvfd
 ```
 
-Use `python main.py --help` and
-`python generate_well_prediction_plots.py --help` for all options.
+See [METHODOLOGY_ALIGNMENT.md](METHODOLOGY_ALIGNMENT.md) for all choices.
+
+## Per-well prediction figures
+
+After a full run, generate one observed-versus-predicted figure per well:
+
+```bash
+python generate_well_prediction_plots.py \
+  --data-root "/path/to/private/data" \
+  --device cuda \
+  --dpi 300
+```
+
+Each figure places train, validation and test on one timeline and separates
+them with dashed vertical lines. Overlapping T+1...T+6 forecasts targeting the
+same date are averaged. The script restores the validation-calibrated
+shrinkage state before inference, so plots and final metrics use the same
+prediction protocol. The 561 generated PNG files are intentionally excluded
+from GitHub.
 
 ## Evaluation protocol
 
-- Quality control, normalization, and causal head filling use training-period
-  information only.
-- Input gaps are forward-filled; no backward filling is used.
-- Losses and metrics use real observations only (`Mask = 1`).
-- Model selection uses validation station-median persistence skill.
-- The test split is never used for training, early stopping, checkpoint
-  selection, or shrinkage calibration.
-- Forecasts use known future forcing, consistent with a scenario-based
-  forecasting protocol.
+- Quality control, normalization and causal filling use training data only.
+- No backward filling is used.
+- Supervised losses and metrics use real observations only (`Mask = 1`).
+- Model selection uses validation station-median persistence skill with a
+  centered ±3-epoch moving average.
+- The test split is never used for training, checkpoint selection or shrinkage.
+- Forecast forcing is known, consistent with a scenario-based protocol.
+
+Per-well metrics are:
+
+```text
+RMSE = sqrt(mean((prediction - observation)^2))
+NSE  = 1 - sum((observation - prediction)^2)
+           / sum((observation - mean(observation))^2)
+```
 
 ## License and citation
 
-The source code is released under the [MIT License](LICENSE). This license does
-not cover third-party data. Data provenance and redistribution constraints are
-documented in [DATA.md](DATA.md).
-
-The formal citation will be added when the associated paper is published.
+Code is released under the [MIT License](LICENSE). The license does not cover
+third-party data. A formal citation will be added when the associated paper is
+published.

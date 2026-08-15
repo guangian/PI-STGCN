@@ -26,8 +26,7 @@ data/
 │   └── evapotranspiration.csv
 └── geometry/
     ├── dem_at_wells.csv
-    ├── z_bot_at_wells.csv      # optional
-    └── L0_at_wells.csv         # optional
+    └── z_bot_at_wells.csv      # optional
 ```
 
 All time-dependent files must use the same five-day timestamps. The released
@@ -85,10 +84,9 @@ Both series are converted to m/day using the factors in `config.yaml`.
 |---|---|---|
 | `geometry/dem_at_wells.csv` | `well_id,elevation` | m |
 | `geometry/z_bot_at_wells.csv` | `well_id,z_bot_m` | m |
-| `geometry/L0_at_wells.csv` | `well_id,L0_m` | m |
 
-DEM is required. `z_bot_at_wells.csv` and `L0_at_wells.csv` are optional; when
-absent, the model uses its configured fallback parameterization.
+DEM is required. `z_bot_at_wells.csv` is optional; when it is absent, the
+model subtracts the configured aquifer-thickness prior from DEM.
 
 ## Quality control and missing values
 
@@ -120,7 +118,8 @@ filling is used, and filled points never contribute to loss or metrics.
 ## Using another dataset
 
 To run PI-STGCN on an authorized dataset, reproduce the directory layout and
-schemas above or update the three paths under `paths` in `config.yaml`. Adjust
-the date range, split boundaries, units, and quality-control thresholds in the
+schemas above and pass its root through `python main.py --data-root <path>`.
+Alternatively, update the three entries under `paths` in `config.yaml`. Adjust
+the date range, split boundaries, units and quality-control thresholds in the
 same configuration file. The loader checks timestamp alignment and well-level
 coverage before training.

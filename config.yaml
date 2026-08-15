@@ -29,15 +29,12 @@ forcing:
   et_extinction_depth_m: 5.0                   # 潜水蒸散埋深消光深度
 
 graph:
-  knn_k: 8                                     # 信息图 kNN（分含水层独立建）
   min_edge_dist_m: 50.0
   dup_jitter_deg: 0.00002                      # 重合坐标抖动（约 2 m，Delaunay 需要）
   voronoi_area_clip_q: [0.05, 0.95]            # 控制体面积截断分位数
   max_wd_ratio: 20.0                           # 界面宽/井距上限（防共点伪边高传导度）
-  info_kernel_km: 20.0                         # 信息图高斯核宽度
 
 physics:
-  lambda_prior: 0.0                            # 反演先验锚强度（0 = 直接输出，无先验校准）
   k_range_m_per_day: [0.1, 100.0]              # K 先验区间（对数尺度 sigmoid 映射）
   sy_range: [0.01, 0.35]
   gamma_range: [0.05, 0.35]                    # 入渗补给系数先验区间
@@ -50,28 +47,18 @@ physics:
                                                # 含水层的快响应尺度）
   tau_recharge_const: 20.0
   tau_baseflow_const: 365.0
-  aquifer_thickness_prior_m: 60.0              # 基底先验：z_bot = dem − b0 + Δz
-  dz_range_m: [-20.0, 20.0]
+  aquifer_thickness_prior_m: 60.0              # 缺少地层底板资料时的固定厚度回退值
   min_sat_thickness_m: 1.0
   smooth_reg_weight: 0.001                     # 参数场空间平滑正则
   pde_char_scale_m_per_day: 0.005              # PDE 残差无量纲化尺度 r0
   rollout_dh_clip_m: 2.0                       # 物理 rollout 单步限幅（数值稳定）
 
 model:
-  hidden: 64
-  tcn_dilations: [1, 2, 4, 8]                  # 感受野 31 步 ≈ 155 天
-  tcn_kernel: 3
-  gc_layers: 2
+  response_hidden: 32                          # 论文式(17)：节点共享响应 MLP
   dropout: 0.1
-  use_leddam: false
-  use_star: false
   use_darcy_attn: true                         # 达西注意力：达西定律作为注意力打分函数
-  head_mode: "lean"                            # 低容量物理结构头（与数据体量匹配的容量设计）
   derive_tau: true                             # τ_b = Sy·L₀²/(4T̄) 而非 ParamNet 自由输出
-  darcy_content: true                          # 内容注意力 × 达西物理掩码
-  use_ref_bottom: true                         # 底板用钻孔地层几何插值（z_bot_at_wells.csv）
   derive_tau_r: true                           # 包气带补给滞后绑定埋深 τ_r=clamp(c_r·depth)
-  derive_L0_geo: false                         # L₀ 用全局可学习标量
 
 train:
   seed: 42
@@ -81,7 +68,6 @@ train:
   select_metric: "skill"
   # 按 ±w 轮中心滑动平均的验证分选型（选中心轮权重），早停同口径
   select_smooth_w: 3
-  swa_top_k: 0
   # 可靠性收缩：主干冻结后在验证期标定逐井收缩系数 λ（测试集不参与）
   use_shrink: true
   batch_windows: 8
@@ -94,6 +80,3 @@ train:
   lambda_pde: 0.2                              # CVFD 残差权重（验证集选型）
   pde_windows_per_batch: 2
   nn_input_forcing: true                       # 强迫进 NN + 物理路径
-  node_mask_frac: 0.15                         # masked-node 遮蔽比例（空间自监督）
-  mask_eval_weight: 1.0
-  ema_decay: 0.0

@@ -28,9 +28,10 @@ from src.data_pipeline import (  # noqa: E402
     PerWellNormalizer,
     build_windows,
     load_bundle,
-    make_features,
+    make_static_features,
+    set_data_root,
 )
-from src.graphs import build_dual_graphs  # noqa: E402
+from src.graphs import build_physical_graph  # noqa: E402
 from src.trainer import Trainer, set_seed  # noqa: E402
 
 
@@ -39,6 +40,7 @@ def parse_args() -> argparse.Namespace:
         description="Generate per-well observed/predicted train-val-test plots."
     )
     parser.add_argument("--config", type=Path, default=CODE_DIR / "config.yaml")
+    parser.add_argument("--data-root", help="Private data directory; never copied")
     parser.add_argument(
         "--checkpoint",
         type=Path,
@@ -63,19 +65,17 @@ def parse_args() -> argparse.Namespace:
 def rebuild_trainer(cfg: dict, device: str, checkpoint: Path):
     set_seed(int(cfg["train"]["seed"]))
     bundle = load_bundle(cfg, CODE_DIR)
-    graphs = build_dual_graphs(
+    graph = build_physical_graph(
         bundle.coords,
         bundle.aquifer_onehot,
-        int(cfg["graph"]["knn_k"]),
         float(cfg["graph"]["min_edge_dist_m"]),
         tuple(cfg["graph"]["voronoi_area_clip_q"]),
         max_wd_ratio=float(cfg["graph"]["max_wd_ratio"]),
-        dem=bundle.dem,
     )
     normalizer = PerWellNormalizer.fit(
         bundle.H_obs, bundle.mask, bundle.train_end_idx
     )
-    features = make_features(bundle, normalizer)
+    features = make_static_features(bundle, normalizer)
     windows = build_windows(
         bundle.H_fill.shape[0],
         int(cfg["data"]["input_len"]),
@@ -89,13 +89,15 @@ def rebuild_trainer(cfg: dict, device: str, checkpoint: Path):
         features,
         windows,
         normalizer,
-        graphs,
+        graph,
         device,
         {},
         checkpoint.parent,
     )
     state = torch.load(checkpoint, map_location=device, weights_only=True)
     trainer.model.load_state_dict(state, strict=True)
+    if bool(cfg["train"]["use_shrink"]):
+        trainer.enable_shrink_transfer()
     trainer.model.eval()
     return bundle, windows, trainer
 
@@ -241,6 +243,7 @@ def plot_well(
 def main() -> None:
     args = parse_args()
     cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    set_data_root(cfg, args.data_root)
     device = (
         args.device
         if args.device == "cpu" or torch.cuda.is_available()
